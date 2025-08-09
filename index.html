@@ -1,0 +1,374 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+<meta name="theme-color" content="#ffffff" />
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icons/icon-192.png">
+<title>Line → Art（PWA）</title>
+<style>
+  :root { --ui: #222; --ink: #111; --bg: #f6f6f6; }
+  html, body { margin: 0; height: 100%; background: var(--bg);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Noto Sans TC", sans-serif;}
+  .wrap { display: grid; grid-template-rows: auto 1fr auto; height: 100%; }
+  header { padding: .6rem .8rem; background: white; box-shadow: 0 1px 6px rgba(0,0,0,.06); position: sticky; top: 0; z-index: 10; }
+  header .row { display:flex; flex-wrap: wrap; gap: .6rem; align-items: center; }
+  header button, header input[type="color"], header input[type="range"], header select {
+    border: 1px solid #ccc; border-radius: 8px; padding: .5rem .8rem; background: #fff; font-size: 14px;
+  }
+  header .group { display:flex; align-items: center; gap: .4rem; }
+  header .label { font-size: 12px; color:#555; }
+  main { position: relative; min-height: 60vh; }
+  #stage { position:absolute; inset: 0; }
+  canvas { position:absolute; top:0; left:0; width:100%; height:100%; touch-action: none; }
+  footer { padding: .5rem .8rem; font-size: 12px; color:#666; background: #fff; }
+  .hint { position: absolute; right: .8rem; bottom: .8rem; background: rgba(255,255,255,.92);
+    border: 1px solid #ddd; padding: .5rem .6rem; border-radius: 8px; font-size: 12px; }
+  .loading { position: absolute; inset: 0; display: grid; place-items: center; pointer-events: none; }
+  .loading .badge { background: #fff; border:1px solid #ddd; padding:.5rem .8rem; border-radius:8px;
+    font-size: 13px; color:#444; box-shadow: 0 1px 6px rgba(0,0,0,.06); }
+  .install-tip{ position:fixed; left:0; right:0; bottom:0; background: #111; color:#fff; font-size:13px;
+    padding:.6rem .9rem; display:none; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="row">
+      <button id="newLineBtn" title="產生新的隨機線條">🎲 新題目</button>
+      <button id="clearBtn" title="清空你的筆畫，保留線條">🗑️ 清除</button>
+      <button id="undoBtn" title="復原上一步">↩︎ 復原</button>
+      <button id="saveBtn" title="存成 PNG 圖片">💾 下載PNG</button>
+
+      <label class="group" title="畫筆顏色">
+        <span class="label">顏色</span>
+        <input id="colorPicker" type="color" value="#111111"/>
+      </label>
+      <label class="group" title="畫筆粗細">
+        <span class="label">粗細</span>
+        <input id="sizePicker" type="range" min="1" max="24" value="4"/>
+      </label>
+
+      <label class="group" title="線條顏色">
+        <span class="label">線條</span>
+        <input id="guideColor" type="color" value="#1e90ff"/>
+      </label>
+      <label class="group" title="線條粗細">
+        <span class="label">粗</span>
+        <input id="guideWidth" type="range" min="1" max="12" value="3"/>
+      </label>
+      <label class="group" title="線條透明度">
+        <span class="label">透明</span>
+        <input id="guideAlpha" type="range" min="0" max="1" step="0.05" value="0.9"/>
+      </label>
+
+      <label class="group" title="難度/複雜度">
+        <span class="label">複雜度</span>
+        <input id="complexity" type="range" min="1" max="5" step="1" value="3"/>
+      </label>
+
+      <label class="group" title="題型">
+        <span class="label">題型</span>
+        <select id="shapeMode">
+          <option value="line">直線（原始）</option>
+          <option value="curve" selected>曲線（樣條）</option>
+          <option value="cloud">雲朵（棉花）</option>
+          <option value="spiral">螺旋（亂度）</option>
+          <option value="scribble">塗鴉（噪聲路徑）</option>
+        </select>
+      </label>
+
+      <label class="group">
+        <input id="toggleGuide" type="checkbox" checked />
+        <span class="label">顯示線條</span>
+      </label>
+    </div>
+  </header>
+
+  <main>
+    <div id="stage">
+      <canvas id="bg"></canvas>
+      <canvas id="fg"></canvas>
+      <div id="loading" class="loading"><div class="badge">初始化畫布…</div></div>
+    </div>
+    <div class="hint">提示：換「題型」→ 產生「雲朵/曲線/螺旋/塗鴉」。調「複雜度」控制細節。</div>
+  </main>
+
+  <footer>
+    Line → Art：隨機一筆，畫出整幅。© 2025
+  </footer>
+</div>
+
+<div id="installTip" class="install-tip">在 Safari 的分享選單中選「加到主畫面」以安裝 App。</div>
+
+<script>
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('./sw.js');
+  });
+}
+(function(){
+  const stage = document.getElementById('stage');
+  const bg = document.getElementById('bg');
+  const fg = document.getElementById('fg');
+  const loading = document.getElementById('loading');
+  const ctxBg = bg.getContext('2d');
+  const ctx = fg.getContext('2d', { willReadFrequently: true });
+
+  const newLineBtn   = document.getElementById('newLineBtn');
+  const clearBtn     = document.getElementById('clearBtn');
+  const undoBtn      = document.getElementById('undoBtn');
+  const saveBtn      = document.getElementById('saveBtn');
+  const colorPicker  = document.getElementById('colorPicker');
+  const sizePicker   = document.getElementById('sizePicker');
+  const guideColor   = document.getElementById('guideColor');
+  const guideWidth   = document.getElementById('guideWidth');
+  const guideAlpha   = document.getElementById('guideAlpha');
+  const toggleGuide  = document.getElementById('toggleGuide');
+  const complexityEl = document.getElementById('complexity');
+  const shapeModeEl  = document.getElementById('shapeMode');
+
+  let drawing = false;
+  let strokes = [];
+  let currentStroke = null;
+  let guidePath = null;
+  let rafSizing = 0;
+
+  const lerp = (a,b,t)=> a+(b-a)*t;
+  const smoothstep = t => t*t*(3-2*t);
+  function mulberry32(a){ return function(){ let t = a += 0x6D2B79F5; t = Math.imul(t ^ t >>> 15, t | 1); t ^= t + Math.imul(t ^ t >>> 7, t | 61); return ((t ^ t >>> 14) >>> 0) / 4294967296; } }
+  function valueNoise1D(seed, steps){ const rnd = mulberry32(seed); const vals = Array.from({length: steps+1}, ()=> rnd()); return function(u){ const x=u*steps; const i=Math.floor(x); const t=smoothstep(x-i); const a=vals[Math.min(i,steps)], b=vals[Math.min(i+1,steps)]; return lerp(a,b,t);}}
+
+  function setCanvasSize(canvas, widthCSS, heightCSS){
+    const dpr = window.devicePixelRatio || 1;
+    canvas.width  = Math.max(1, Math.floor(widthCSS  * dpr));
+    canvas.height = Math.max(1, Math.floor(heightCSS * dpr));
+    canvas.style.width  = widthCSS + 'px';
+    canvas.style.height = heightCSS + 'px';
+    const cctx = canvas.getContext('2d');
+    cctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  }
+  function resizeNow(){
+    const rect = stage.getBoundingClientRect();
+    if(rect.width === 0 || rect.height === 0) return;
+    setCanvasSize(bg, rect.width, rect.height);
+    setCanvasSize(fg, rect.width, rect.height);
+    redrawAll();
+    drawGuide();
+  }
+  function queueResize(){ cancelAnimationFrame(rafSizing); rafSizing=requestAnimationFrame(resizeNow); }
+  const ro = new ResizeObserver(queueResize); ro.observe(stage);
+  window.addEventListener('orientationchange', () => setTimeout(queueResize, 50), {passive:true});
+  window.addEventListener('resize', queueResize, {passive:true});
+
+  function catmullRomToBezier(points){
+    const segs = [];
+    for(let i=0;i<points.length-1;i++){
+      const p0 = points[i-1] || points[i];
+      const p1 = points[i];
+      const p2 = points[i+1];
+      const p3 = points[i+2] || p2;
+      const c1 = { x: p1.x + (p2.x - p0.x)/6, y: p1.y + (p2.y - p0.y)/6 };
+      const c2 = { x: p2.x - (p3.x - p1.x)/6, y: p2.y - (p3.y - p1.y)/6 };
+      segs.push([p1, c1, c2, p2]);
+    }
+    return segs;
+  }
+
+  function genCurve(rect, seed){
+    const rnd = mulberry32(seed);
+    const padding = 40;
+    const w = rect.width - padding*2;
+    theight = rect.height - padding*2;
+    const n = 6 + (parseInt(complexityEl.value,10)-1)*3;
+    const pts = [];
+    const cx = padding + w/2, cy = padding + theight/2;
+    const R = Math.min(w,theight) * (0.25 + rnd()*0.15);
+    for(let i=0;i<n;i++){
+      const a = rnd()*Math.PI*2;
+      const r = R * (0.7 + rnd()*0.6);
+      pts.push({ x: cx + Math.cos(a)*r, y: cy + Math.sin(a)*r });
+    }
+    pts.sort((A,B)=> Math.atan2(A.y-cy, A.x-cx) - Math.atan2(B.y-cy, B.x-cx));
+    return { type:'curve', points: pts, closed:false };
+  }
+
+  function genCloud(rect, seed){
+    const padding = 40;
+    const w = rect.width - padding*2;
+    const h = rect.height - padding*2;
+    const cx = padding + w/2, cy = padding + h/2;
+    const baseR = Math.min(w,h) * 0.28;
+    const complexity = parseInt(complexityEl.value,10);
+    const steps = 80 + complexity*40;
+    const noiseSteps = 8 + complexity*4;
+    const amp = 0.15 + complexity*0.05;
+    const freq = 1.0 + complexity*0.6;
+    const noise = valueNoise1D(seed, noiseSteps);
+
+    const pts = [];
+    for(let i=0;i<steps;i++){
+      const u = i/(steps-1);
+      const ang = u * Math.PI * 2;
+      const n1 = noise((u*freq) % 1);
+      const n2 = noise(((u*freq*2.13) % 1));
+      const n = (n1*0.6 + n2*0.4);
+      const r = baseR * (1 + amp*(n - 0.5)*2);
+      pts.push({ x: cx + Math.cos(ang)*r, y: cy + Math.sin(ang)*r });
+    }
+    return { type:'curve', points: pts, closed:true };
+  }
+
+  function genSpiral(rect, seed){
+    const rnd = mulberry32(seed);
+    const padding = 30;
+    const w = rect.width - padding*2;
+    const h = rect.height - padding*2;
+    const cx = padding + w/2, cy = padding + h/2;
+    const complexity = parseInt(complexityEl.value,10);
+    const turns = 1.5 + complexity*0.6;
+    const steps = Math.floor(240 + complexity*80);
+    const maxR = Math.min(w,h)*0.4;
+    const jitter = 0.8 + complexity*0.8;
+
+    const pts = [];
+    for(let i=0;i<steps;i++){
+      const t = i/(steps-1);
+      const ang = t * turns * Math.PI*2;
+      const r = maxR * t;
+      const jx = (rnd()-0.5)*jitter;
+      const jy = (rnd()-0.5)*jitter;
+      pts.push({ x: cx + Math.cos(ang)*r + jx, y: cy + Math.sin(ang)*r + jy });
+    }
+    return { type:'curve', points: pts, closed:false };
+  }
+
+  function genScribble(rect, seed){
+    const rnd = mulberry32(seed);
+    const padding = 30;
+    const w = rect.width - padding*2;
+    const h = rect.height - padding*2;
+    const cx = padding + w/2, cy = padding + h/2;
+    const steps = 300 + parseInt(complexityEl.value,10)*150;
+    const stepLen = Math.min(w,h) * 0.006 * (1 + rnd());
+    const noise = valueNoise1D(seed^12345, 16 + parseInt(complexityEl.value,10)*6);
+
+    let x = cx, y = cy;
+    const pts = [{x,y}];
+    for(let i=1;i<steps;i++){
+      const u = i/steps;
+      const ang = noise((u*3.7)%1) * Math.PI*2;
+      x += Math.cos(ang) * stepLen;
+      y += Math.sin(ang) * stepLen;
+      x = Math.max(padding, Math.min(padding + w, x));
+      y = Math.max(padding, Math.min(padding + h, y));
+      pts.push({x,y});
+    }
+    return { type:'curve', points: pts, closed:false };
+  }
+
+  function newGuide(){
+    const rect = stage.getBoundingClientRect();
+    if(rect.width === 0 || rect.height === 0) return;
+    const seed = Math.floor(Math.random()*1e9);
+    const mode = shapeModeEl.value;
+    if(mode === 'cloud') guidePath = genCloud(rect, seed);
+    else if(mode === 'spiral') guidePath = genSpiral(rect, seed);
+    else if(mode === 'scribble') guidePath = genScribble(rect, seed);
+    else guidePath = genCurve(rect, seed);
+    drawGuide();
+  }
+
+  function drawGuide(){
+    const c = ctxBg;
+    c.clearRect(0,0,bg.width,bg.height);
+    if(!toggleGuide.checked || !guidePath) return;
+    c.save();
+    c.globalAlpha = parseFloat(guideAlpha.value);
+    c.lineWidth = parseFloat(guideWidth.value);
+    c.strokeStyle = guideColor.value;
+    c.lineCap = 'round';
+    c.lineJoin = 'round';
+    if(guidePath.type === 'curve'){
+      const pts = guidePath.points;
+      if(pts.length < 2) { c.restore(); return; }
+      const segs = (function catmull(points){
+        const segs=[];
+        for(let i=0;i<points.length-1;i++){
+          const p0=points[i-1]||points[i], p1=points[i], p2=points[i+1], p3=points[i+2]||p2;
+          const c1={x:p1.x+(p2.x-p0.x)/6, y:p1.y+(p2.y-p0.y)/6};
+          const c2={x:p2.x-(p3.x-p1.x)/6, y:p2.y-(p3.y-p1.y)/6};
+          segs.push([p1,c1,c2,p2]);
+        }
+        return segs;
+      })(pts.concat(guidePath.closed ? [pts[0]] : []));
+      c.beginPath();
+      c.moveTo(pts[0].x, pts[0].y);
+      for(const [p1,c1,c2,p2] of segs){ c.bezierCurveTo(c1.x,c1.y,c2.x,c2.y,p2.x,p2.y); }
+      if(guidePath.closed) c.closePath();
+      c.stroke();
+    }
+    c.restore();
+  }
+
+  function redrawAll(){
+    const c = ctx;
+    c.clearRect(0,0,fg.width,fg.height);
+    for(const s of strokes){
+      if(!s.points.length) continue;
+      c.strokeStyle = s.color;
+      c.lineWidth = s.size;
+      c.lineCap = 'round';
+      c.lineJoin = 'round';
+      c.beginPath();
+      for(let i=0;i<s.points.length;i++){
+        const p = s.points[i];
+        if(i===0) c.moveTo(p.x, p.y);
+        else c.lineTo(p.x, p.y);
+      }
+      c.stroke();
+    }
+  }
+
+  function pointerPos(ev){
+    const rect = fg.getBoundingClientRect();
+    const isTouch = ev.touches && ev.touches[0];
+    const clientX = isTouch ? ev.touches[0].clientX : ev.clientX;
+    const clientY = isTouch ? ev.touches[0].clientY : ev.clientY;
+    return { x: clientX - rect.left, y: clientY - rect.top };
+  }
+  function startDraw(ev){ ev.preventDefault(); drawing=true; currentStroke={ color: colorPicker.value, size: parseFloat(sizePicker.value), points: [] }; currentStroke.points.push(pointerPos(ev)); strokes.push(currentStroke); redrawAll(); }
+  function moveDraw(ev){ if(!drawing) return; ev.preventDefault(); currentStroke.points.push(pointerPos(ev)); redrawAll(); }
+  function endDraw(ev){ if(!drawing) return; ev.preventDefault(); drawing=false; currentStroke=null; }
+
+  newLineBtn.addEventListener('click', newGuide);
+  clearBtn.addEventListener('click', () => { strokes = []; redrawAll(); });
+  undoBtn.addEventListener('click', () => { strokes.pop(); redrawAll(); });
+
+  // Export PNG (1:1 pixels)
+  saveBtn.addEventListener('click', () => {
+    const w = bg.width, h = bg.height;
+    const tmp = document.createElement('canvas'); tmp.width = w; tmp.height = h;
+    const tctx = tmp.getContext('2d'); tctx.fillStyle = '#ffffff'; tctx.fillRect(0,0,w,h);
+    tctx.drawImage(bg, 0, 0); tctx.drawImage(fg, 0, 0);
+    const url = tmp.toDataURL('image/png');
+    const a = document.createElement('a'); a.href = url; a.download = 'line_to_art.png';
+    if(typeof a.download === 'string'){ document.body.appendChild(a); a.click(); a.remove(); }
+    else { const win = window.open(); if(win){ win.document.write('<img src=\"'+url+'\" alt=\"export\" />'); } }
+  });
+
+  fg.addEventListener('mousedown', startDraw);
+  fg.addEventListener('mousemove', moveDraw);
+  window.addEventListener('mouseup', endDraw);
+  fg.addEventListener('touchstart', startDraw, {passive:false});
+  fg.addEventListener('touchmove', moveDraw, {passive:false});
+  fg.addEventListener('touchend', endDraw, {passive:false});
+  fg.addEventListener('touchcancel', endDraw, {passive:false});
+
+  function initOnce(){ requestAnimationFrame(()=>{ queueResize(); newGuide(); loading.style.display='none'; }); }
+  if(document.readyState==='complete'||document.readyState==='interactive'){ initOnce(); } else { document.addEventListener('DOMContentLoaded', initOnce); }
+})();
+</script>
+</body>
+</html>
